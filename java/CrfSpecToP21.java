@@ -381,10 +381,10 @@ public class CrfSpecToP21 {
 
             wb.addSheet("FormSpec", Arrays.asList("Attribute", "Value"), Arrays.asList(
                     Arrays.asList("Name", "Ben Testing"),
-                    Arrays.asList("Version", ""),
+                    Arrays.asList("Version", "999"),
                     Arrays.asList("Type", "EDC"),
                     Arrays.asList("Description", "CDISC COSMOS Data CRF Specialization"),
-                    Arrays.asList("Publisher", "")));
+                    Arrays.asList("Publisher", "Ben")));
 
             wb.addSheet("Events",
                     Arrays.asList("Order", "ID", "Name", "Type", "Mandatory", "Repeating", "Developer Notes"),

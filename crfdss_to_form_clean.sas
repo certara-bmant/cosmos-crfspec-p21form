@@ -587,10 +587,10 @@ run;
 data formspec;
   length Attribute $20 Value $100;
   Attribute = 'Name';        Value = 'Ben Testing';                          output;
-  Attribute = 'Version';     Value = '';                                     output;
+  Attribute = 'Version';     Value = '999';                                  output;
   Attribute = 'Type';        Value = 'EDC';                                  output;
   Attribute = 'Description'; Value = 'CDISC COSMOS Data CRF Specialization'; output;
-  Attribute = 'Publisher';   Value = '';                                     output;
+  Attribute = 'Publisher';   Value = 'Ben';                                   output;
 run;
 
 /*------------------------------------------------------------------------------
