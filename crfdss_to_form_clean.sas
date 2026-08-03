@@ -336,7 +336,7 @@ data form_final(keep=order id name description class repeating condition
   order + 1;
 run;
 
-proc sort data=dss_derived out=sections_raw(keep=domain section_id crf_group_id short_name) nodupkey;
+proc sort data=dss_derived out=sections_raw(keep=domain section_id crf_group_id short_name bc_id) nodupkey;
   by section_id;
 run;
 
@@ -344,7 +344,11 @@ proc sort data=sections_raw;
   by domain section_id;
 run;
 
-data sections_final(keep=form order id name mandatory repeating condition developer_notes);
+/* BC_ID (Biomedical Concept id, e.g. "C83347") is a trailing extension
+   column, not part of the standard P21 template - kept for traceability,
+   same pattern as the extension columns on Questions. Confirmed constant
+   within a crf_group_id in the source (no aggregation ambiguity). */
+data sections_final(keep=form order id name mandatory repeating condition developer_notes bc_id);
   attrib
     form            length=$200 label='Form'
     order           label='Order'
@@ -355,6 +359,10 @@ data sections_final(keep=form order id name mandatory repeating condition develo
     condition       length=$200 label='Condition'
     developer_notes length=$200 label='Developer Notes'
   ;
+  /* bc_id already exists (passed through from the source) - just label it,
+     rather than redeclaring its length via ATTRIB, which would otherwise
+     produce a harmless "multiple lengths specified" note. */
+  label bc_id = 'BC ID';
   set sections_raw;
   by domain;
 

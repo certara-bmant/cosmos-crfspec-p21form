@@ -192,7 +192,7 @@ public class CrfSpecToP21 {
                 sections.computeIfAbsent(sectionId, id -> {
                     int order = countSectionsForForm(r.domain) + 1;
                     String name = !r.shortName.isEmpty() ? r.shortName : r.crfGroupId;
-                    return new SectionInfo(id, name, r.domain, order);
+                    return new SectionInfo(id, name, r.domain, order, r.bcId);
                 });
             }
         }
@@ -399,11 +399,14 @@ public class CrfSpecToP21 {
             }
             wb.addSheet("Forms", formHeaders, formRows);
 
+            // BC ID (Biomedical Concept id, e.g. "C83347") is a trailing extension
+            // column, not part of the standard P21 template - kept for traceability,
+            // same pattern as the extension columns on Questions.
             List<String> sectionHeaders = Arrays.asList("Form", "Order", "ID", "Name", "Mandatory", "Repeating",
-                    "Condition", "Developer Notes");
+                    "Condition", "Developer Notes", "BC ID");
             List<List<String>> sectionRows = new ArrayList<>();
             for (SectionInfo s : sortedSections()) {
-                sectionRows.add(Arrays.asList(s.form, String.valueOf(s.order), s.id, s.name, "No", "No", "", ""));
+                sectionRows.add(Arrays.asList(s.form, String.valueOf(s.order), s.id, s.name, "No", "No", "", "", s.bcId));
             }
             wb.addSheet("Sections", sectionHeaders, sectionRows);
 
@@ -504,7 +507,7 @@ public class CrfSpecToP21 {
         final String codelistSubmissionValue, valueList, valueDisplayList, prepopulatedTerm;
         final String dataType, length, significantDigits, mandatoryVariable;
         final String sdtmTargetVariable, sdtmAnnotation, questionText, prompt, completionInstructions;
-        final String implementationOption, orderNumber, nciCodelistId;
+        final String implementationOption, orderNumber, nciCodelistId, bcId;
 
         String fixedDataType, fixedSignificantDigits;
         UnitKind unitKind = UnitKind.NONE;
@@ -536,6 +539,7 @@ public class CrfSpecToP21 {
             implementationOption = get(r, "implementation_option");
             orderNumber = get(r, "order_number");
             nciCodelistId = get(r, "codelist"); // the CDISC/NCI controlled terminology codelist id, e.g. "C66731"
+            bcId = get(r, "bc_id"); // Biomedical Concept id, e.g. "C83347" - constant within a crf_group_id
 
             fixedDataType = dataType;
             fixedSignificantDigits = significantDigits;
@@ -661,11 +665,13 @@ public class CrfSpecToP21 {
     static class SectionInfo {
         final String id, name, form;
         final int order;
-        SectionInfo(String id, String name, String form, int order) {
+        final String bcId;
+        SectionInfo(String id, String name, String form, int order, String bcId) {
             this.id = id;
             this.name = name;
             this.form = form;
             this.order = order;
+            this.bcId = bcId;
         }
     }
 
