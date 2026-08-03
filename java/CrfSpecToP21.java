@@ -192,7 +192,7 @@ public class CrfSpecToP21 {
                 sections.computeIfAbsent(sectionId, id -> {
                     int order = countSectionsForForm(r.domain) + 1;
                     String name = !r.shortName.isEmpty() ? r.shortName : r.crfGroupId;
-                    return new SectionInfo(id, name, r.domain, order, r.bcId);
+                    return new SectionInfo(id, name, r.domain, order, r.bcId, r.vlmGroupId);
                 });
             }
         }
@@ -399,14 +399,17 @@ public class CrfSpecToP21 {
             }
             wb.addSheet("Forms", formHeaders, formRows);
 
-            // BC ID (Biomedical Concept id, e.g. "C83347") is a trailing extension
-            // column, not part of the standard P21 template - kept for traceability,
-            // same pattern as the extension columns on Questions.
+            // BC ID (Biomedical Concept id, e.g. "C83347") and VLM Group ID are
+            // trailing extension columns, not part of the standard P21 template -
+            // kept for traceability, same pattern as the extension columns on
+            // Questions. Both confirmed constant within a crf_group_id in the
+            // source, so there's no ambiguity about which value to surface.
             List<String> sectionHeaders = Arrays.asList("Form", "Order", "ID", "Name", "Mandatory", "Repeating",
-                    "Condition", "Developer Notes", "BC ID");
+                    "Condition", "Developer Notes", "BC ID", "VLM Group ID");
             List<List<String>> sectionRows = new ArrayList<>();
             for (SectionInfo s : sortedSections()) {
-                sectionRows.add(Arrays.asList(s.form, String.valueOf(s.order), s.id, s.name, "No", "No", "", "", s.bcId));
+                sectionRows.add(Arrays.asList(s.form, String.valueOf(s.order), s.id, s.name, "No", "No", "", "",
+                        s.bcId, s.vlmGroupId));
             }
             wb.addSheet("Sections", sectionHeaders, sectionRows);
 
@@ -665,13 +668,14 @@ public class CrfSpecToP21 {
     static class SectionInfo {
         final String id, name, form;
         final int order;
-        final String bcId;
-        SectionInfo(String id, String name, String form, int order, String bcId) {
+        final String bcId, vlmGroupId;
+        SectionInfo(String id, String name, String form, int order, String bcId, String vlmGroupId) {
             this.id = id;
             this.name = name;
             this.form = form;
             this.order = order;
             this.bcId = bcId;
+            this.vlmGroupId = vlmGroupId;
         }
     }
 
