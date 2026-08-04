@@ -259,9 +259,13 @@ public class CrfSpecToP21 {
                 q.put("Developer Notes", "");
                 // Extension columns (not part of the P21 template, kept for
                 // traceability - CDISC COSMOS-specific fields Ben wanted retained).
+                // dec_id lives here rather than on Sections because it varies per
+                // crf_item within a crf_group_id (unlike bc_id/vlm_group_id, which
+                // are constant per section).
                 q.put("Short Name", r.shortName);
                 q.put("SDTM Annotation", r.sdtmAnnotation);
                 q.put("Prepopulated Term", r.prepopulatedTerm);
+                q.put("DEC ID", r.decId);
                 questionRows.add(q);
             }
         }
@@ -510,7 +514,7 @@ public class CrfSpecToP21 {
         final String codelistSubmissionValue, valueList, valueDisplayList, prepopulatedTerm;
         final String dataType, length, significantDigits, mandatoryVariable;
         final String sdtmTargetVariable, sdtmAnnotation, questionText, prompt, completionInstructions;
-        final String implementationOption, orderNumber, nciCodelistId, bcId;
+        final String implementationOption, orderNumber, nciCodelistId, bcId, decId;
 
         String fixedDataType, fixedSignificantDigits;
         UnitKind unitKind = UnitKind.NONE;
@@ -543,6 +547,7 @@ public class CrfSpecToP21 {
             orderNumber = get(r, "order_number");
             nciCodelistId = get(r, "codelist"); // the CDISC/NCI controlled terminology codelist id, e.g. "C66731"
             bcId = get(r, "bc_id"); // Biomedical Concept id, e.g. "C83347" - constant within a crf_group_id
+            decId = get(r, "dec_id"); // Data Element Concept id, e.g. "C78541" - varies per crf_item, unlike bc_id
 
             fixedDataType = dataType;
             fixedSignificantDigits = significantDigits;

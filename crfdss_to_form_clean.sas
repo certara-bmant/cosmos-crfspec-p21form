@@ -392,11 +392,14 @@ run;
 
 /* The first block of columns matches the Questions sheet of the P21 Form
    Template exactly, in template order. Short_Name/SDTM_Annotation/
-   Prepopulated_Term aren't template columns, but are kept as trailing
+   Prepopulated_Term/Dec_ID aren't template columns, but are kept as trailing
    extension columns (P21 tolerates extra columns beyond the standard
    template) rather than dropped - appended after Developer Notes, not
    interleaved with the template's own columns. Method/Condition are
-   template columns with no source mapping, included blank. */
+   template columns with no source mapping, included blank. Dec_ID (Data
+   Element Concept id, e.g. "C78541") lives here rather than on Sections
+   because it varies per crf_item within a crf_group_id, unlike bc_id/
+   vlm_group_id, which are constant per section. */
 data questions_final;
   attrib
     Form                    label='Form'
@@ -425,6 +428,7 @@ data questions_final;
     Short_Name              label='Short Name'
     SDTM_Annotation         label='SDTM Annotation'
     Prepopulated_Term       label='Prepopulated Term'
+    Dec_ID                  label='DEC ID'
   ;
   set dss_ordered;
   by domain section_id;
@@ -481,12 +485,13 @@ data questions_final;
   Short_Name = short_name;
   SDTM_Annotation = sdtm_annotation;
   Prepopulated_Term = prepopulated_term;
+  Dec_ID = dec_id;
 
   keep Form Section Order ID Source_Variable_Name Question_Text Prompt
        Description Data_Type Core Length Digits Mandatory Codelist Measurement_Units
        Method Condition Completion_Instructions Implementation_Notes Mapping_Instructions
        SDTM_Target Reason_Not_Mapped Developer_Notes
-       Short_Name SDTM_Annotation Prepopulated_Term;
+       Short_Name SDTM_Annotation Prepopulated_Term Dec_ID;
 run;
 
 /*------------------------------------------------------------------------------
