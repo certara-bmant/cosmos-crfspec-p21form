@@ -47,6 +47,21 @@
  6. Source_Variable_Name was left blank in Questions even though
     variable_name was available in the source. Mapped here.
 
+ 7. QUESTIONS.CODELIST TRUNCATED TO 7 CHARACTERS. dss_ordered (built from
+    dss_derived, ultimately from dss) already has a column literally named
+    "codelist" - the source's raw CDISC/NCI controlled terminology reference,
+    e.g. "C66731", which PROC IMPORT sizes at ~7 characters based on the
+    longest value actually present. SAS variable names are case-insensitive,
+    so the ATTRIB-declared "Codelist" in questions_final (intended to hold
+    the up-to-80-character codelist_id) is the SAME variable as that
+    pre-existing short one once "set dss_ordered;" runs, unless ATTRIB stakes
+    an explicit length claim first. Without one, "Codelist = codelist_id;"
+    silently truncated every value to 7 chars (e.g. "EGMETHOD_12_LEAD_
+    STANDARD" -> "EGMETHO") - invisible in the Codelists/Terms sheets, which
+    already had an explicit length=$80 on their own same-named variables, so
+    only Questions (and, defensively, VLM) needed the same explicit length
+    added.
+
  Sheet names, columns, and column order below match Ben's "Form-Spec-Template"
  workbook exactly (FormSpec, Events, Forms, Sections, Questions, Units,
  Codelists, Methods, Conditions, Terms, ScheduleOfActivities). Events/Methods/
@@ -160,9 +175,20 @@ data dss_derived;
        without needing anything outside Base SAS.                            */
     if length(raw_key) <= 60 then
       codelist_id = prxchange('s/_+/_/', -1, prxchange('s/[^A-Za-z0-9_]+/_/', -1, trim(raw_key)));
-    else
-      codelist_id = substr(trim(prxchange('s/[^A-Za-z0-9_]+/_/', -1, trim(base))), 1, 40)
+    else do;
+      /* clean_base is almost always shorter than 40 chars (submission values
+         like "ACN"/"CMTRT" are short codes) - substr(x, 1, 40) against a
+         string with less than 40 characters of real content triggers "NOTE:
+         Invalid third argument to function SUBSTR" (position+length-1 would
+         run past the string's actual content). Capping length at min(40,
+         actual length) makes the truncation a no-op for short bases and safe
+         for long ones, instead of relying on a fixed literal that assumes
+         the base is always >= 40 characters. */
+      length clean_base $200;
+      clean_base = prxchange('s/[^A-Za-z0-9_]+/_/', -1, trim(base));
+      codelist_id = substr(clean_base, 1, min(40, length(clean_base)))
                     || '_' || put(md5(raw_key), $hex8.);
+    end;
   end;
   else do;
     codelist_id = '';
@@ -197,7 +223,7 @@ data dss_derived;
     normalized_key = catx('_', of term_arr[*]);
   return;
 
-  drop _i _n base normalized_key raw_key suffix;
+  drop _i _n base normalized_key raw_key suffix clean_base;
 run;
 
 /* QC_Checks sheet: same intent as the original "chks" dataset, now actually
@@ -399,7 +425,12 @@ run;
    template columns with no source mapping, included blank. Dec_ID (Data
    Element Concept id, e.g. "C78541") lives here rather than on Sections
    because it varies per crf_item within a crf_group_id, unlike bc_id/
-   vlm_group_id, which are constant per section. */
+   vlm_group_id, which are constant per section.
+
+   Codelist is given an explicit length=$80 below (fix #7) - without it, the
+   pre-existing short source column "codelist" (the raw NCI id, e.g.
+   "C66731", ~7 chars) collides case-insensitively via "set dss_ordered;"
+   and silently truncates every codelist_id assigned into it to 7 chars. */
 data questions_final;
   attrib
     Form                    label='Form'
@@ -415,7 +446,7 @@ data questions_final;
     Length                  label='Length'
     Digits                  label='Digits'
     Mandatory               label='Mandatory' format=$3.
-    Codelist                label='Codelist'
+    Codelist                length=$80 label='Codelist'
     Measurement_Units       label='Measurement Units'
     Method                  label='Method'
     Condition               label='Condition'
@@ -561,7 +592,7 @@ data vlm_final;
     Format                 label='Format'
     Mandatory              label='Mandatory'
     Assigned_Value         label='Assigned Value'
-    Codelist               label='Codelist'
+    Codelist               length=$80 label='Codelist'
     Origin                 label='Origin'
   ;
   set vlm_targets;
