@@ -123,6 +123,16 @@ data dss_derived;
   if length = 200 and not missing(significant_digits) then
     typchk = 'Data type likely text and digits not required';
 
+  /* Source data quality flag (not a bug in this program): a "date" field
+     whose sdtm_target_variable is identical to crf_item is almost certainly
+     mis-mapped - real date CDASH variables map to a *DTC target (e.g.
+     CMSTDAT -> CMSTDTC, DMDAT -> DMDTC), and 276 of 280 date rows in the
+     source do exactly that. Only AESTDAT and AEENDAT (both AE_DENORMALIZED
+     and AE_NORMALIZED) are self-mapped in this extract - flagged here rather
+     than silently corrected, since the source may be fixed upstream. */
+  if data_type = 'date' and crf_item ne '' and sdtm_target_variable = crf_item then
+    typchk = catx('; ', typchk, 'SDTM target self-mapped to CRF item - likely should be a *DTC variable');
+
   /* ---- 2b. Auto-fix for the same discrepant details the QC flag catches --- */
   fixed_data_type   = data_type;
   fixed_sig_digits  = significant_digits;
@@ -453,7 +463,7 @@ data questions_final;
     Completion_Instructions label='Completion Instructions'
     Implementation_Notes    label='Implementation Notes'
     Mapping_Instructions    label='Mapping Instructions'
-    SDTM_Target             label='SDTM Target'
+    SDTM_Target             length=$200 label='SDTM Target'
     Reason_Not_Mapped       label='Reason Not Mapped'
     Developer_Notes         label='Developer Notes'
     Short_Name              label='Short Name'
@@ -483,14 +493,29 @@ data questions_final;
   Codelist = codelist_id;
   Measurement_Units = ifc(is_vlm_target = 'Y', translate(value_list, ',', ';'), '');
 
-  /* SDTM_Target: prefix each comma-separated SDTM variable with "<domain>." */
+  /* SDTM_Target: prefix each SDTM variable with "<domain>.", then join with
+     ",", which is the delimiter P21 actually expects for a multi-variable
+     target.
+     FIX: the source delimits multi-variable SDTM targets with ";" (e.g.
+     "AEENRTPT;AEENRF;AEENTPT"), never ",". The original logic checked for a
+     comma (countc(SDTM_Target, ',')), which never matched, so only a single
+     domain prefix got stuck on the front of the whole semicolon-joined
+     string and the later variables were left bare - e.g.
+     "AE.AEENRTPT;AEENRF;AEENTPT" instead of a properly split, prefixed,
+     comma-joined list. Rewritten as an explicit token loop (same pattern as
+     normalize_terms above) that splits on ";", prefixes every part, and
+     re-joins with ",". */
   SDTM_Target = sdtm_target_variable;
   if SDTM_Target ne '' then do;
-    if countc(SDTM_Target, ',') eq 0 then SDTM_Target = trim(left(domain)) || '.' || SDTM_Target;
-    else do;
-      SDTM_Target = tranwrd(SDTM_Target, ',', ',' || trim(left(domain)) || '.');
-      SDTM_Target = trim(left(domain)) || '.' || SDTM_Target;
+    length _sdtm_out $200 _sdtm_part $100;
+    _sdtm_out = '';
+    _sdtm_n = countc(SDTM_Target, ';') + 1;
+    do _sdtm_i = 1 to _sdtm_n;
+      _sdtm_part = strip(scan(SDTM_Target, _sdtm_i, ';'));
+      if _sdtm_part ne '' then
+        _sdtm_out = catx(',', _sdtm_out, trim(left(domain)) || '.' || _sdtm_part);
     end;
+    SDTM_Target = _sdtm_out;
   end;
 
   if first.section_id then Order = 1;

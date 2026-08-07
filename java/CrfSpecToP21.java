@@ -117,6 +117,16 @@ public class CrfSpecToP21 {
                     issue = "Data type should be float";
                 } else if (r.length.equals("200") && !r.significantDigits.isEmpty()) {
                     issue = "Data type likely text and digits not required";
+                } else if (r.dataType.equals("date") && !r.crfItem.isEmpty()
+                        && r.sdtmTargetVariable.equals(r.crfItem)) {
+                    // Source data quality flag (not a bug in this program): a "date"
+                    // field whose sdtm_target_variable equals crf_item is almost
+                    // certainly mis-mapped - real date CDASH variables map to a *DTC
+                    // target (e.g. CMSTDAT -> CMSTDTC, DMDAT -> DMDTC), and 276 of 280
+                    // date rows in the source do exactly that. Only AESTDAT and
+                    // AEENDAT are self-mapped in this extract - flagged here rather
+                    // than silently corrected, since the source may be fixed upstream.
+                    issue = "SDTM target self-mapped to CRF item - likely should be a *DTC variable";
                 }
                 if (issue != null) {
                     Map<String, String> row = new LinkedHashMap<>();
@@ -270,13 +280,23 @@ public class CrfSpecToP21 {
             }
         }
 
+        // FIX: the source delimits multi-variable SDTM targets with ";" (e.g.
+        // "AEENRTPT;AEENRF;AEENTPT"), never ",". The original split on "," never
+        // matched, so the whole semicolon-joined string was treated as one
+        // variable and only got a single domain prefix stuck on the front -
+        // e.g. "AE.AEENRTPT;AEENRF;AEENTPT" instead of every variable being
+        // individually prefixed. Split on ";", prefix each part, and re-join
+        // with "," - the delimiter P21 actually expects for a multi-variable
+        // target.
         private String buildSdtmTarget(String domain, String sdtmTargetVariable) {
             if (sdtmTargetVariable.isEmpty()) return "";
-            String[] parts = sdtmTargetVariable.split(",");
+            String[] parts = sdtmTargetVariable.split(";");
             StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < parts.length; i++) {
-                if (i > 0) sb.append(",");
-                sb.append(domain).append(".").append(parts[i].trim());
+            for (String part : parts) {
+                String trimmed = part.trim();
+                if (trimmed.isEmpty()) continue;
+                if (sb.length() > 0) sb.append(",");
+                sb.append(domain).append(".").append(trimmed);
             }
             return sb.toString();
         }
