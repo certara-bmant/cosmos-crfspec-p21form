@@ -111,6 +111,28 @@
     No, Yes", "Subset for LOC: Brachial Artery, Femoral Artery, ..." -
     meaningful and guaranteed distinct by construction.
 
+ 10. THREE FOLLOW-UP REFINEMENTS TO FIX #9. (a) A shared codelist whose term
+     list is too long to use directly (>60 characters) now tries combining
+     its (few) owning crf_group_ids into the id before falling back to a
+     hash - e.g. "ACN_AE_DENORMALIZED_AE_NORMALIZED" for a list shared by
+     exactly 2 groups - since a short group list is more traceable than an
+     opaque hash. Verified: 5 of 7 real long-shared codelists in the source
+     fit this way; the other 2 (FTREASND, shared by 15 groups; LOC's
+     SYSBP/HR/DIABP location set, shared by 6) still need the hash, since no
+     reasonably short combination of that many group names would help. (b)
+     The term preview used for shared-codelist names (fix #9) only read
+     value_display_list/value_list, so a codelist whose term came from
+     prepopulated_term with NEITHER of those populated (e.g. the
+     Prothrombin Time unit fields' bare "s"/"ms" defaults) got a
+     blank-looking name: "Unit, subset for  (Original)". Now falls through
+     to effective_list (prepopulated_term) too. (c) The Terms sheet's
+     "Order" column no longer matches physical row order: NODUPKEY needs a
+     (codelist, recommended_term) sort to find the duplicate rows a shared
+     codelist creates, but that sort is alphabetical by term text, which
+     left the already-computed Order value out of sequence with the row
+     it's on. Re-sorted back to (codelist, order) and renumbered
+     contiguously after dedup.
+
  Sheet names, columns, and column order below match Ben's "Form-Spec-Template"
  workbook exactly (FormSpec, Events, Forms, Sections, Questions, Units,
  Codelists, Methods, Conditions, Terms, ScheduleOfActivities). Events/Methods/
@@ -298,11 +320,31 @@ proc sql;
     group by raw_key;
 quit;
 
+proc sort data=_rk_group_counts; by raw_key; run;
+
+/* Sorted, underscore-joined list of every crf_group_id that references a
+   given raw_key - lets a shared-but-too-long-for-a-direct-key codelist (see
+   below) get a readable id built from its (few) owning groups instead of an
+   opaque hash, when there are few enough of them to keep it a reasonable
+   length. _rk_groups is already sorted by raw_key/crf_group_id, so this is
+   just the same retain+catx accumulation pattern used for wc_combined
+   above. */
+data _rk_group_list;
+  length group_list $600;
+  set _rk_groups;
+  by raw_key;
+  retain group_list;
+  if first.raw_key then group_list = '';
+  group_list = catx('_', group_list, crf_group_id);
+  if last.raw_key then output;
+  keep raw_key group_list;
+run;
+
 proc sort data=dss_step1; by raw_key; run;
 
 data dss_derived;
   length codelist_id $80 codelist_name $200;
-  merge dss_step1(in=a) _rk_group_counts(in=b);
+  merge dss_step1(in=a) _rk_group_counts(in=b) _rk_group_list;
   by raw_key;
   if a;
 
@@ -321,16 +363,30 @@ data dss_derived;
       if length(raw_key) <= 60 then
         codelist_id = prxchange('s/_+/_/', -1, prxchange('s/[^A-Za-z0-9_]+/_/', -1, trim(raw_key)));
       else do;
-        /* clean_base is almost always shorter than 40 chars (submission
-           values like "ACN"/"CMTRT" are short codes) - substr(x, 1, 40)
-           against a string with less than 40 characters of real content
-           triggers "NOTE: Invalid third argument to function SUBSTR".
-           Capping length at min(40, actual length) makes the truncation a
-           no-op for short bases and safe for long ones. */
-        length clean_base $200;
-        clean_base = prxchange('s/[^A-Za-z0-9_]+/_/', -1, trim(base));
-        codelist_id = substr(clean_base, 1, min(40, length(clean_base)))
-                      || '_' || put(md5(raw_key), $hex8.);
+        /* Long term list (e.g. the 30+ term CMTRT drug list, or LOC's
+           "Brachial/Femoral/Peripheral/Radial Artery" location set). Try
+           combining the (few) crf_group_ids that reference this shared
+           content into the id first - readable when there are only a
+           handful of them (e.g. "ACN_AE_DENORMALIZED_AE_NORMALIZED" for a
+           list shared by exactly 2 groups; verified against the source
+           file: 5 of 7 real long-shared codelists fit this way). Falls back
+           to a hash only when there are too many owning groups to keep the
+           id a reasonable length (e.g. FTREASND, shared by 15 different
+           ADAS-Cog sub-tests) - clean_base is almost always shorter than 40
+           chars (submission values like "ACN"/"CMTRT" are short codes);
+           substr(x, 1, 40) against a string with less than 40 characters of
+           real content triggers "NOTE: Invalid third argument to function
+           SUBSTR", so length is capped at min(40, actual length) to make
+           the truncation a no-op for short bases and safe for long ones. */
+        length group_id_candidate $600 clean_base $200;
+        group_id_candidate = prxchange('s/_+/_/', -1,
+                                prxchange('s/[^A-Za-z0-9_]+/_/', -1, trim(base || '_' || group_list)));
+        if length(group_id_candidate) <= 70 then codelist_id = group_id_candidate;
+        else do;
+          clean_base = prxchange('s/[^A-Za-z0-9_]+/_/', -1, trim(base));
+          codelist_id = substr(clean_base, 1, min(40, length(clean_base)))
+                        || '_' || put(md5(raw_key), $hex8.);
+        end;
       end;
     end;
     else do;
@@ -371,6 +427,14 @@ data dss_derived;
     length term_preview $200;
     term_preview = value_display_list;
     if term_preview = '' then term_preview = value_list;
+    /* Falls through to effective_list (which is prepopulated_term when
+       value_list is blank) for a shared codelist whose term came from a
+       prepopulated default rather than a real picklist - e.g. the "PT"
+       (Prothrombin Time) unit fields' seconds/milliseconds default, where
+       value_display_list AND value_list are both blank. Without this,
+       term_preview stayed empty and produced a blank-looking name: "Unit,
+       subset for  (Original)" for codelist id UNIT_UNIT_S/UNIT_UNIT_M. */
+    if term_preview = '' then term_preview = effective_list;
     term_preview = translate(trim(term_preview), ',', ';');
     if length(term_preview) > 80 then term_preview = substr(term_preview, 1, 77) || '...';
 
@@ -391,7 +455,7 @@ data dss_derived;
     else codelist_name = 'Subset for ' || trim(left(short_name));
   end;
 
-  drop n_groups candidate_id;
+  drop n_groups candidate_id group_id_candidate clean_base term_preview group_list;
 run;
 
 /* QC_Checks sheet: same intent as the original "chks" dataset, now actually
@@ -456,8 +520,28 @@ data terms_final(keep=order codelist display_term recommended_term)
   end;
 run;
 
+/* NODUPKEY needs a (codelist, recommended_term) sort to find the duplicate
+   rows a shared codelist creates (the same term list gets exploded once per
+   source row that references it - e.g. "NY" exploded once per crf_item that
+   uses it). But that sort is ALPHABETICAL by term text, which leaves the
+   already-computed "order" column out of sequence with the actual row
+   order - e.g. a codelist's rows would print in alphabetical term order
+   while Order reads 3, 1, 2. Re-sort back to (codelist, order) afterward and
+   renumber contiguously (nodupkey may have dropped some rows, leaving gaps
+   in the original 1..N sequence). */
 proc sort data=terms_final nodupkey;
   by codelist recommended_term;
+run;
+
+proc sort data=terms_final;
+  by codelist order;
+run;
+
+data terms_final;
+  set terms_final;
+  by codelist;
+  if first.codelist then order = 0;
+  order + 1;
 run;
 
 proc sort data=units nodupkey;

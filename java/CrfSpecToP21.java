@@ -187,8 +187,9 @@ public class CrfSpecToP21 {
                 }
 
                 boolean isPrepopOnly = r.valueList.isEmpty(); // no real value_list, just a default term
-                boolean shared = groupsByRawKey.get(rawKeyByRow[i]).size() > 1;
-                CodelistKey key = CodelistKey.build(r, effectiveList, shared, isPrepopOnly);
+                Set<String> owningGroups = groupsByRawKey.get(rawKeyByRow[i]);
+                boolean shared = owningGroups.size() > 1;
+                CodelistKey key = CodelistKey.build(r, effectiveList, shared, isPrepopOnly, owningGroups);
                 CodelistInfo info = codelists.computeIfAbsent(key.canonicalKey,
                         k -> new CodelistInfo(key.id, key.name, r.isVlmTarget));
                 r.resolvedCodelistId = info.id;
@@ -675,7 +676,8 @@ public class CrfSpecToP21 {
          * is decided independently of shared/exclusive below, not nested
          * inside it.
          */
-        static CodelistKey build(Row r, String effectiveList, boolean shared, boolean isPrepopOnly) {
+        static CodelistKey build(Row r, String effectiveList, boolean shared, boolean isPrepopOnly,
+                                  Set<String> owningGroups) {
             String base = baseOf(r);
             String rawKey = rawKeyOf(r, effectiveList);
             String suffix = r.unitKind == UnitKind.ORIGINAL ? "Original"
@@ -684,7 +686,7 @@ public class CrfSpecToP21 {
             // ---- id: shared-vs-exclusive ----
             String id;
             if (shared) {
-                id = sanitizeId(base, rawKey);
+                id = sanitizeId(base, rawKey, owningGroups);
             } else {
                 // Ordered <variable/codelist>_<crf_group_id> (e.g.
                 // "QSORRES_EQ5D0201"), not the other way around - matches the
@@ -729,7 +731,16 @@ public class CrfSpecToP21 {
 
         /** Short, human-readable rendering of a row's actual term list, for shared-codelist names. */
         private static String termPreview(Row r) {
-            String preview = !r.valueDisplayList.isEmpty() ? r.valueDisplayList : r.valueList;
+            String preview = !r.valueDisplayList.isEmpty() ? r.valueDisplayList
+                    : !r.valueList.isEmpty() ? r.valueList
+                    // Falls through to prepopulatedTerm for a shared codelist whose
+                    // term came from a prepopulated default rather than a real
+                    // picklist - e.g. the "PT" (Prothrombin Time) unit fields'
+                    // seconds/milliseconds default, where valueDisplayList AND
+                    // valueList are both empty. Without this, termPreview stayed
+                    // empty and produced a blank-looking name: "Unit, subset for
+                    // (Original)" for codelist id UNIT_UNIT_S/UNIT_UNIT_M.
+                    : r.prepopulatedTerm;
             preview = preview.replace(";", ", ").trim();
             return preview.length() > 80 ? preview.substring(0, 77) + "..." : preview;
         }
@@ -764,10 +775,34 @@ public class CrfSpecToP21 {
 
         /** Human/ID-friendly identifier, capped in length via a stable checksum for long term lists. */
         private static String sanitizeId(String base, String rawKey) {
-            String cleanBase = sanitize(base);
             if (rawKey.length() <= 60) {
                 return sanitize(rawKey);
             }
+            return hashFallback(base, rawKey);
+        }
+
+        /**
+         * Same as the 2-arg form for short raw keys, but for long ones tries
+         * combining the (few) crf_group_ids that reference this shared content
+         * into the id first - readable when there are only a handful of them
+         * (e.g. "ACN_AE_DENORMALIZED_AE_NORMALIZED" for a list shared by
+         * exactly 2 groups; verified against the source file: 5 of 7 real
+         * long-shared codelists fit this way). Falls back to a hash only when
+         * there are too many owning groups to keep the id a reasonable length
+         * (e.g. FTREASND, shared by 15 different ADAS-Cog sub-tests).
+         */
+        private static String sanitizeId(String base, String rawKey, Set<String> owningGroups) {
+            if (rawKey.length() <= 60) {
+                return sanitize(rawKey);
+            }
+            List<String> sortedGroups = new ArrayList<>(owningGroups);
+            Collections.sort(sortedGroups);
+            String candidate = sanitize(base + "_" + String.join("_", sortedGroups));
+            return candidate.length() <= 70 ? candidate : hashFallback(base, rawKey);
+        }
+
+        private static String hashFallback(String base, String rawKey) {
+            String cleanBase = sanitize(base);
             CRC32 crc = new CRC32();
             crc.update(rawKey.getBytes());
             return cleanBase + "_" + Long.toHexString(crc.getValue());
