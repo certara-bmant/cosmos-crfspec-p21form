@@ -82,21 +82,34 @@
     meaningless direct key ("FTORRES_0_1_10_2_3_4_5_6_7_8_9" for an 11-point
     ADAS-Cog scale) - neither tells a reviewer what the codelist actually is.
     Now: codelists referenced by only ONE crf_group_id (verified: everything
-    in this category) get a readable id instead - <crf_group_id>_<base>,
-    e.g. "EQ5D0201_QSORRES", "ADCDRL_FTORRES" - since crf_group_id is already
-    guaranteed unique in the COSMOS model, this can't collide with anything.
-    Codelists shared across MULTIPLE crf_group_ids (like "NY") keep the
-    original content-based id, since there's no single group to name them
-    after and that's exactly the identity fix #1 needs. Verified against the
-    full source file: 257 distinct codelists (matches the real SAS log),
-    zero id collisions, longest generated id 60 characters.
+    in this category) get a readable id instead - <base>_<crf_group_id>
+    (variable/codelist first, then the qualifying suffix, matching P21's
+    usual codelist ID convention), e.g. "QSORRES_EQ5D0201",
+    "FTORRES_ADCDRL" - since crf_group_id is already guaranteed unique in
+    the COSMOS model, this can't collide with anything. Codelists shared
+    across MULTIPLE crf_group_ids (like "NY") keep the original
+    content-based id, since there's no single group to name them after and
+    that's exactly the identity fix #1 needs. Verified against the full
+    source file: 257 distinct codelists (matches the real SAS log), zero id
+    collisions, longest generated id 60 characters.
 
-    A related naming bug: exclusive codelists built from prepopulated_term
-    (a single default value, not a real picklist - e.g. LBCAT = "CHEMISTRY")
-    were named after the enclosing crf_group's short_name ("Subset for
-    Albumin/Creatinine in Urine (Denormalized)"), which has nothing to do
-    with the actual default value. Now named after the value itself
-    ("Subset for Chemistry").
+    A related naming bug, in two parts. First: codelists built from
+    prepopulated_term (a single default value, not a real picklist - e.g.
+    LBCAT = "CHEMISTRY") were named after the enclosing crf_group's
+    short_name ("Subset for Albumin/Creatinine in Urine (Denormalized)"),
+    which has nothing to do with the actual default value - affected 69
+    such codelists, not just this one. Now named after the value itself
+    ("Subset for Chemistry"). Second: every OTHER shared codelist (not
+    prepopulated_term-derived) was named after whichever crf_group's
+    short_name happened to survive the nodupkey pass - arbitrary, and
+    outright wrong whenever the same base is reused by multiple distinct
+    shared codelists (5 of 19 such bases - "UNIT", "LOC", "POSITION",
+    "VSRESU", "IEORRES" - cover more than one genuinely different term set,
+    so naming them all after their base alone would just trade one
+    ambiguous name for another). Shared codelists are now named after their
+    base plus a short preview of their actual terms - e.g. "Subset for NY:
+    No, Yes", "Subset for LOC: Brachial Artery, Femoral Artery, ..." -
+    meaningful and guaranteed distinct by construction.
 
  Sheet names, columns, and column order below match Ben's "Form-Spec-Template"
  workbook exactly (FormSpec, Events, Forms, Sections, Questions, Units,
@@ -324,12 +337,15 @@ data dss_derived;
       /* EXCLUSIVE to this one CRF group - readable, group-qualified id, no
          hash needed (verified: never exceeds ~60 chars for any row in the
          current source; the length check + hash below is just a safety net
-         for a future, longer crf_group_id/base combination). */
+         for a future, longer crf_group_id/base combination). Ordered
+         <variable/codelist>_<crf_group_id> (e.g. "QSORRES_EQ5D0201"), not
+         the other way around - matches the variable-then-qualifying-suffix
+         convention P21 codelist IDs typically use. */
       length candidate_id $70;
       if is_vlm_target = 'Y' then
-        candidate_id = prxchange('s/[^A-Za-z0-9_]+/_/', -1, trim('UNIT_' || crf_group_id || '_' || base));
+        candidate_id = prxchange('s/[^A-Za-z0-9_]+/_/', -1, trim('UNIT_' || base || '_' || crf_group_id));
       else
-        candidate_id = prxchange('s/[^A-Za-z0-9_]+/_/', -1, trim(crf_group_id || '_' || base));
+        candidate_id = prxchange('s/[^A-Za-z0-9_]+/_/', -1, trim(base || '_' || crf_group_id));
       if is_prepop_only = 'Y' then candidate_id = trim(candidate_id) || '_PREPOP';
       candidate_id = prxchange('s/_+/_/', -1, candidate_id);
 
@@ -337,25 +353,41 @@ data dss_derived;
       else codelist_id = substr(candidate_id, 1, 55) || '_' || put(md5(raw_key), $hex8.);
     end;
 
-    /* ---- name: unit vs. prepopulated-default vs. group short_name ----
-       Independent of shared/exclusive above - a prepopulated default value
-       (e.g. LBCAT = "CHEMISTRY", shared across 57 different lab-panel CRF
-       groups) isn't a real multi-choice picklist and has nothing to do with
-       whichever group's short_name happens to survive the nodupkey pass
-       ("Subset for Albumin/Creatinine in Urine (Denormalized)" for what's
-       really just the lab category default "Chemistry" - Ben's reported
-       issue, and one that turned out to affect 69 shared prepopulated-value
-       codelists, not just this one). Name it after the actual default value
-       instead, regardless of whether the codelist is shared or exclusive. */
+    /* ---- name: unit vs. prepopulated-default vs. group short_name/terms --
+       The prepopulated-default case (below) is independent of shared vs.
+       exclusive - see its comment. For the other two cases: EXCLUSIVE
+       codelists keep short_name, since it correctly and unambiguously
+       describes the one CRF group that owns them. SHARED codelists can no
+       longer be named after "whichever group's short_name happened to
+       survive the nodupkey pass" - that was arbitrary, and outright wrong
+       whenever the same base is reused by MULTIPLE distinct shared
+       codelists (confirmed: of 19 distinct bases behind a shared codelist,
+       5 - "UNIT", "LOC", "POSITION", "VSRESU", "IEORRES" - cover more than
+       one genuinely different term set, so "Subset for LOC" alone would be
+       just as ambiguous as the short_name it replaces). Shared codelists are
+       named after their base plus a short preview of their actual terms
+       instead - meaningful and guaranteed distinct, since two different
+       shared codelists always differ in their term content by construction. */
+    length term_preview $200;
+    term_preview = value_display_list;
+    if term_preview = '' then term_preview = value_list;
+    term_preview = translate(trim(term_preview), ',', ';');
+    if length(term_preview) > 80 then term_preview = substr(term_preview, 1, 77) || '...';
+
     if is_vlm_target = 'Y' then do;
       length suffix $10;
       if unit_kind = 'ORIGINAL' then suffix = 'Original';
       else if unit_kind = 'STANDARD' then suffix = 'Standard';
       else suffix = 'Units';
-      codelist_name = 'Unit, subset for ' || trim(left(short_name)) || ' - ' || trim(suffix);
+      if n_groups > 1 then
+        codelist_name = 'Unit, subset for ' || trim(left(term_preview)) || ' (' || trim(suffix) || ')';
+      else
+        codelist_name = 'Unit, subset for ' || trim(left(short_name)) || ' - ' || trim(suffix);
     end;
     else if is_prepop_only = 'Y' then
       codelist_name = 'Subset for ' || propcase(trim(left(effective_list)));
+    else if n_groups > 1 then
+      codelist_name = 'Subset for ' || trim(left(base)) || ': ' || trim(left(term_preview));
     else codelist_name = 'Subset for ' || trim(left(short_name));
   end;
 

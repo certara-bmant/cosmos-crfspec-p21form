@@ -658,7 +658,7 @@ public class CrfSpecToP21 {
          * EQ-5D dimension's long text options, and
          * "FTORRES_0_1_10_2_3_4_5_6_7_8_9" for an 11-point ADAS-Cog scale).
          * crf_group_id is already guaranteed unique in the COSMOS model, so
-         * <crf_group_id>_<base> is guaranteed distinct from every other
+         * <base>_<crf_group_id> is guaranteed distinct from every other
          * exclusive codelist without any hash - verified against the full
          * source file with zero collisions (257 distinct codelists, matching
          * the real SAS log; longest generated id 60 characters).
@@ -686,7 +686,11 @@ public class CrfSpecToP21 {
             if (shared) {
                 id = sanitizeId(base, rawKey);
             } else {
-                String candidate = sanitize((r.isVlmTarget ? "UNIT_" : "") + r.crfGroupId + "_" + base);
+                // Ordered <variable/codelist>_<crf_group_id> (e.g.
+                // "QSORRES_EQ5D0201"), not the other way around - matches the
+                // variable-then-qualifying-suffix convention P21 codelist IDs
+                // typically use.
+                String candidate = sanitize((r.isVlmTarget ? "UNIT_" : "") + base + "_" + r.crfGroupId);
                 if (isPrepopOnly) candidate = candidate + "_PREPOP";
                 // Defensive fallback only - never triggered by the current
                 // source file, but guards against a future, longer
@@ -694,16 +698,40 @@ public class CrfSpecToP21 {
                 id = candidate.length() <= 70 ? candidate : sanitizeId(base, rawKey);
             }
 
-            // ---- name: unit vs. prepopulated-default vs. group short_name ----
+            // ---- name: unit vs. prepopulated-default vs. group short_name/terms ----
+            // EXCLUSIVE codelists keep short_name, since it correctly and
+            // unambiguously describes the one crf_group that owns them.
+            // SHARED codelists can no longer be named after "whichever
+            // group's short_name happened to survive dedup" - that was
+            // arbitrary, and outright wrong whenever the same base is reused
+            // by MULTIPLE distinct shared codelists (confirmed: of 19
+            // distinct bases behind a shared codelist, 5 - "UNIT", "LOC",
+            // "POSITION", "VSRESU", "IEORRES" - cover more than one
+            // genuinely different term set, so "Subset for LOC" alone would
+            // be just as ambiguous as the short_name it replaces). Shared
+            // codelists are named after their base plus a short preview of
+            // their actual terms instead - meaningful and guaranteed
+            // distinct, since two different shared codelists always differ
+            // in their term content by construction.
             String name;
             if (r.isVlmTarget) {
-                name = "Unit, subset for " + r.shortName + " - " + suffix;
+                name = shared ? "Unit, subset for " + termPreview(r) + " (" + suffix + ")"
+                               : "Unit, subset for " + r.shortName + " - " + suffix;
             } else if (isPrepopOnly) {
                 name = "Subset for " + propcase(effectiveList.trim());
+            } else if (shared) {
+                name = "Subset for " + base + ": " + termPreview(r);
             } else {
                 name = "Subset for " + r.shortName;
             }
             return new CodelistKey(rawKey, id, name);
+        }
+
+        /** Short, human-readable rendering of a row's actual term list, for shared-codelist names. */
+        private static String termPreview(Row r) {
+            String preview = !r.valueDisplayList.isEmpty() ? r.valueDisplayList : r.valueList;
+            preview = preview.replace(";", ", ").trim();
+            return preview.length() > 80 ? preview.substring(0, 77) + "..." : preview;
         }
 
         /** Title-cases a string (mirrors SAS's PROPCASE) - "CHEMISTRY" -> "Chemistry". */
