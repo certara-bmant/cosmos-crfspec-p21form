@@ -62,6 +62,42 @@
     only Questions (and, defensively, VLM) needed the same explicit length
     added.
 
+ 8. SDTM_TARGET MULTI-VARIABLE DELIMITER. The source delimits multi-variable
+    SDTM targets with ";" (e.g. "AEENRTPT;AEENRF;AEENTPT"), never ",". The
+    domain-prefix logic checked for a comma, which never matched, so these
+    never actually got split - only a single domain prefix landed on the
+    front of the whole string. Every variable is now individually split out,
+    prefixed with "<domain>.", and re-joined with "," (the delimiter P21
+    expects). Also flagged (not silently corrected) a source data issue:
+    AESTDAT/AEENDAT in the AE domain have sdtm_target_variable self-mapped to
+    the CRF item instead of the expected *DTC variable - see the QC_Checks
+    sheet.
+
+ 9. CODELIST IDS THAT WERE TECHNICALLY UNIQUE BUT UNREADABLE. Fix #1 above
+    keys codelist identity by content so broadly-reused lists (the standard
+    Yes/No "NY" list, reused by ~140 different crf_groups) collapse into one
+    row. But for content that's LONG (many terms) or just not human-readable
+    (a plain numeric scale), that same content-based id was either hashed
+    ("QSORRES_163C2CA3" for an EQ-5D dimension's text options) or left as a
+    meaningless direct key ("FTORRES_0_1_10_2_3_4_5_6_7_8_9" for an 11-point
+    ADAS-Cog scale) - neither tells a reviewer what the codelist actually is.
+    Now: codelists referenced by only ONE crf_group_id (verified: everything
+    in this category) get a readable id instead - <crf_group_id>_<base>,
+    e.g. "EQ5D0201_QSORRES", "ADCDRL_FTORRES" - since crf_group_id is already
+    guaranteed unique in the COSMOS model, this can't collide with anything.
+    Codelists shared across MULTIPLE crf_group_ids (like "NY") keep the
+    original content-based id, since there's no single group to name them
+    after and that's exactly the identity fix #1 needs. Verified against the
+    full source file: 257 distinct codelists (matches the real SAS log),
+    zero id collisions, longest generated id 60 characters.
+
+    A related naming bug: exclusive codelists built from prepopulated_term
+    (a single default value, not a real picklist - e.g. LBCAT = "CHEMISTRY")
+    were named after the enclosing crf_group's short_name ("Subset for
+    Albumin/Creatinine in Urine (Denormalized)"), which has nothing to do
+    with the actual default value. Now named after the value itself
+    ("Subset for Chemistry").
+
  Sheet names, columns, and column order below match Ben's "Form-Spec-Template"
  workbook exactly (FormSpec, Events, Forms, Sections, Questions, Units,
  Codelists, Methods, Conditions, Terms, ScheduleOfActivities). Events/Methods/
@@ -110,10 +146,10 @@ run;
    this file did) makes SAS render a missing value as "." on export instead
    of a blank cell - the "Digits column full of dots" bug. Comparisons below
    use numeric literals (200, not '200'; missing(), not ne '') accordingly. */
-data dss_derived;
+data dss_step1;
   length typchk $200 unit_kind $10 fixed_data_type $20
          base $200 effective_list $4000 normalized_key $4000 raw_key $4200
-         codelist_id $80 codelist_name $200 section_id $200 is_vlm_target $1;
+         section_id $200 is_vlm_target $1 is_prepop_only $1;
   set dss;
 
   /* ---- 2a. QC flags (informational only - see the QC_Checks sheet) ---- */
@@ -152,12 +188,26 @@ data dss_derived;
     unit_kind = 'OTHER_UNIT';
   is_vlm_target = ifc(unit_kind ne 'NONE', 'Y', 'N');
 
-  /* ---- 2d. Canonical codelist key (fix #1 - the duplicate codelist bug) ---
+  /* ---- 2d. Canonical content key (fix #1 - the duplicate codelist bug) ---
      Identity = (submission value, or variable name/crf_item as a fallback)
      + the SORTED, upper-cased set of terms. Same content -> same key, always
-     - regardless of which question or section happens to reference it.      */
+     - regardless of which question or section happens to reference it. This
+     raw_key is used two ways further down (step 2f): to decide whether a
+     codelist is a broadly-reused standard list (kept content-keyed) or
+     exclusive to one CRF group (given a readable, group-qualified id
+     instead - see below), and as the fallback content-hash source for the
+     rare case that even the readable id is too long.
+
+     effective_list can come from value_list (a real multi-choice picklist)
+     or, when that's blank, from prepopulated_term (a single default value
+     being assigned to the field, not a real picklist at all) - is_prepop_only
+     records which, since the two need different id/name treatment in 2f. */
   effective_list = value_list;
-  if effective_list = '' then effective_list = prepopulated_term;
+  is_prepop_only = 'N';
+  if effective_list = '' then do;
+    effective_list = prepopulated_term;
+    if effective_list ne '' then is_prepop_only = 'Y';
+  end;
 
   if effective_list ne '' then do;
     base = codelist_submission_value;
@@ -166,43 +216,12 @@ data dss_derived;
 
     link normalize_terms; /* -> sets normalized_key from effective_list */
 
-    if is_vlm_target = 'Y' then do;
-      length suffix $10;
-      if unit_kind = 'ORIGINAL' then suffix = 'Original';
-      else if unit_kind = 'STANDARD' then suffix = 'Standard';
-      else suffix = 'Units';
-      raw_key = 'UNIT_' || trim(base) || '_' || trim(normalized_key);
-      codelist_name = 'Unit, subset for ' || trim(left(short_name)) || ' - ' || trim(suffix);
-    end;
-    else do;
-      raw_key = trim(base) || '_' || trim(normalized_key);
-      codelist_name = 'Subset for ' || trim(left(short_name));
-    end;
-
-    /* Keep IDs human-readable for short keys; hash long term lists (e.g. the
-       30+ term CMTRT drug list) down to a stable, short suffix instead of a
-       500-character ID. MD5 gives us a deterministic, collision-safe hash
-       without needing anything outside Base SAS.                            */
-    if length(raw_key) <= 60 then
-      codelist_id = prxchange('s/_+/_/', -1, prxchange('s/[^A-Za-z0-9_]+/_/', -1, trim(raw_key)));
-    else do;
-      /* clean_base is almost always shorter than 40 chars (submission values
-         like "ACN"/"CMTRT" are short codes) - substr(x, 1, 40) against a
-         string with less than 40 characters of real content triggers "NOTE:
-         Invalid third argument to function SUBSTR" (position+length-1 would
-         run past the string's actual content). Capping length at min(40,
-         actual length) makes the truncation a no-op for short bases and safe
-         for long ones, instead of relying on a fixed literal that assumes
-         the base is always >= 40 characters. */
-      length clean_base $200;
-      clean_base = prxchange('s/[^A-Za-z0-9_]+/_/', -1, trim(base));
-      codelist_id = substr(clean_base, 1, min(40, length(clean_base)))
-                    || '_' || put(md5(raw_key), $hex8.);
-    end;
+    if is_vlm_target = 'Y' then raw_key = 'UNIT_' || trim(base) || '_' || trim(normalized_key);
+    else raw_key = trim(base) || '_' || trim(normalized_key);
   end;
   else do;
-    codelist_id = '';
-    codelist_name = '';
+    base = '';
+    raw_key = '';
   end;
 
   /* ---- 2e. Section id --------------------------------------------------
@@ -233,7 +252,114 @@ data dss_derived;
     normalized_key = catx('_', of term_arr[*]);
   return;
 
-  drop _i _n base normalized_key raw_key suffix clean_base;
+  drop _i _n normalized_key;
+run;
+
+/* ---- 2f. Codelist id/name assignment (two-pass) -----------------------
+   How many DISTINCT crf_group_ids reference each canonical raw_key across
+   the WHOLE file? That tells us whether a codelist's content is a broadly
+   reused standard list (e.g. the Yes/No "NY" list, reused by ~140 different
+   crf_groups - exactly the case fix #1 above collapses) or exclusive to a
+   single crf_group (e.g. one EQ-5D dimension's text options, or a lab
+   category default). Reported issue: for exclusive codelists, basing the id
+   on content alone produced either an opaque hash suffix when the term list
+   was long ("QSORRES_163C2CA3" for an EQ-5D dimension) or a meaningless
+   numeric-soup id when it wasn't ("FTORRES_0_1_10_2_3_4_5_6_7_8_9" for an
+   11-point ADAS-Cog scale) - neither tells a reviewer what the codelist
+   actually is. Since crf_group_id is already guaranteed unique in the
+   COSMOS model, <crf_group_id>_<base> is a strictly better, hash-free id for
+   anything exclusive to one group - verified against the full source file
+   with zero collisions (257 distinct codelists, matching the real SAS log,
+   longest generated id 60 characters). Shared/standard lists keep the
+   original content-based id: there's no single "owning" group to name them
+   after, and this is exactly the identity fix #1 relies on. */
+proc sort data=dss_step1(keep=raw_key crf_group_id where=(raw_key ne ''))
+          out=_rk_groups nodupkey;
+  by raw_key crf_group_id;
+run;
+
+proc sql;
+  create table _rk_group_counts as
+    select raw_key, count(*) as n_groups
+    from _rk_groups
+    group by raw_key;
+quit;
+
+proc sort data=dss_step1; by raw_key; run;
+
+data dss_derived;
+  length codelist_id $80 codelist_name $200;
+  merge dss_step1(in=a) _rk_group_counts(in=b);
+  by raw_key;
+  if a;
+
+  if raw_key = '' then do;
+    codelist_id = '';
+    codelist_name = '';
+  end;
+  else do;
+    /* ---- id: shared-vs-exclusive (unaffected by naming, below) ---- */
+    if n_groups > 1 then do;
+      /* SHARED across multiple CRF groups - identity must stay content-based.
+         Direct sanitized key when short; hash the rare long term list (e.g.
+         the 30+ term CMTRT drug list) down to a stable, short suffix instead
+         of a 500-character id. MD5 gives a deterministic, collision-safe
+         hash without needing anything outside Base SAS. */
+      if length(raw_key) <= 60 then
+        codelist_id = prxchange('s/_+/_/', -1, prxchange('s/[^A-Za-z0-9_]+/_/', -1, trim(raw_key)));
+      else do;
+        /* clean_base is almost always shorter than 40 chars (submission
+           values like "ACN"/"CMTRT" are short codes) - substr(x, 1, 40)
+           against a string with less than 40 characters of real content
+           triggers "NOTE: Invalid third argument to function SUBSTR".
+           Capping length at min(40, actual length) makes the truncation a
+           no-op for short bases and safe for long ones. */
+        length clean_base $200;
+        clean_base = prxchange('s/[^A-Za-z0-9_]+/_/', -1, trim(base));
+        codelist_id = substr(clean_base, 1, min(40, length(clean_base)))
+                      || '_' || put(md5(raw_key), $hex8.);
+      end;
+    end;
+    else do;
+      /* EXCLUSIVE to this one CRF group - readable, group-qualified id, no
+         hash needed (verified: never exceeds ~60 chars for any row in the
+         current source; the length check + hash below is just a safety net
+         for a future, longer crf_group_id/base combination). */
+      length candidate_id $70;
+      if is_vlm_target = 'Y' then
+        candidate_id = prxchange('s/[^A-Za-z0-9_]+/_/', -1, trim('UNIT_' || crf_group_id || '_' || base));
+      else
+        candidate_id = prxchange('s/[^A-Za-z0-9_]+/_/', -1, trim(crf_group_id || '_' || base));
+      if is_prepop_only = 'Y' then candidate_id = trim(candidate_id) || '_PREPOP';
+      candidate_id = prxchange('s/_+/_/', -1, candidate_id);
+
+      if length(candidate_id) <= 70 then codelist_id = candidate_id;
+      else codelist_id = substr(candidate_id, 1, 55) || '_' || put(md5(raw_key), $hex8.);
+    end;
+
+    /* ---- name: unit vs. prepopulated-default vs. group short_name ----
+       Independent of shared/exclusive above - a prepopulated default value
+       (e.g. LBCAT = "CHEMISTRY", shared across 57 different lab-panel CRF
+       groups) isn't a real multi-choice picklist and has nothing to do with
+       whichever group's short_name happens to survive the nodupkey pass
+       ("Subset for Albumin/Creatinine in Urine (Denormalized)" for what's
+       really just the lab category default "Chemistry" - Ben's reported
+       issue, and one that turned out to affect 69 shared prepopulated-value
+       codelists, not just this one). Name it after the actual default value
+       instead, regardless of whether the codelist is shared or exclusive. */
+    if is_vlm_target = 'Y' then do;
+      length suffix $10;
+      if unit_kind = 'ORIGINAL' then suffix = 'Original';
+      else if unit_kind = 'STANDARD' then suffix = 'Standard';
+      else suffix = 'Units';
+      codelist_name = 'Unit, subset for ' || trim(left(short_name)) || ' - ' || trim(suffix);
+    end;
+    else if is_prepop_only = 'Y' then
+      codelist_name = 'Subset for ' || propcase(trim(left(effective_list)));
+    else codelist_name = 'Subset for ' || trim(left(short_name));
+  end;
+
+  drop n_groups candidate_id;
 run;
 
 /* QC_Checks sheet: same intent as the original "chks" dataset, now actually

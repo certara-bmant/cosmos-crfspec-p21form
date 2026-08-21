@@ -159,13 +159,36 @@ public class CrfSpecToP21 {
         // ---- Step 3: codelists, keyed by content, not by question -----------------
 
         private void buildCodelistsAndTerms(List<Row> rows) {
-            for (Row r : rows) {
+            // Pass 1: for every row that has a term list, compute its canonical
+            // content key and track how many DISTINCT crf_group_ids reference
+            // that exact content across the whole file. That count decides
+            // whether the codelist is a broadly-reused standard list (e.g. the
+            // Yes/No "NY" list, reused by ~140 different crf_groups - the case
+            // fix #1 above collapses) or exclusive to one crf_group_id (e.g.
+            // one EQ-5D dimension's text options) - see CodelistKey.build for
+            // why that distinction changes how the id/name get built.
+            Map<String, Set<String>> groupsByRawKey = new LinkedHashMap<>();
+            String[] rawKeyByRow = new String[rows.size()];
+            for (int i = 0; i < rows.size(); i++) {
+                Row r = rows.get(i);
+                String effectiveList = r.valueList.isEmpty() ? r.prepopulatedTerm : r.valueList;
+                if (effectiveList.isEmpty()) continue;
+                String rawKey = CodelistKey.rawKeyOf(r, effectiveList);
+                rawKeyByRow[i] = rawKey;
+                groupsByRawKey.computeIfAbsent(rawKey, k -> new LinkedHashSet<>()).add(r.crfGroupId);
+            }
+
+            // Pass 2: assign the final id/name now that shared-vs-exclusive is known.
+            for (int i = 0; i < rows.size(); i++) {
+                Row r = rows.get(i);
                 String effectiveList = r.valueList.isEmpty() ? r.prepopulatedTerm : r.valueList;
                 if (effectiveList.isEmpty()) {
                     continue; // nothing to build a codelist from
                 }
 
-                CodelistKey key = CodelistKey.build(r, effectiveList);
+                boolean isPrepopOnly = r.valueList.isEmpty(); // no real value_list, just a default term
+                boolean shared = groupsByRawKey.get(rawKeyByRow[i]).size() > 1;
+                CodelistKey key = CodelistKey.build(r, effectiveList, shared, isPrepopOnly);
                 CodelistInfo info = codelists.computeIfAbsent(key.canonicalKey,
                         k -> new CodelistInfo(key.id, key.name, r.isVlmTarget));
                 r.resolvedCodelistId = info.id;
@@ -173,10 +196,10 @@ public class CrfSpecToP21 {
 
                 String[] terms = effectiveList.split(";", -1);
                 String[] decoded = r.valueDisplayList.isEmpty() ? new String[0] : r.valueDisplayList.split(";", -1);
-                for (int i = 0; i < terms.length; i++) {
-                    String term = terms[i].trim();
+                for (int j = 0; j < terms.length; j++) {
+                    String term = terms[j].trim();
                     if (term.isEmpty()) continue;
-                    String decodedValue = i < decoded.length ? decoded[i].trim() : "";
+                    String decodedValue = j < decoded.length ? decoded[j].trim() : "";
                     info.addTerm(term, decodedValue);
                 }
             }
@@ -611,23 +634,92 @@ public class CrfSpecToP21 {
             this.name = name;
         }
 
-        static CodelistKey build(Row r, String effectiveList) {
-            String base = !r.codelistSubmissionValue.isEmpty() ? r.codelistSubmissionValue
+        private static String baseOf(Row r) {
+            return !r.codelistSubmissionValue.isEmpty() ? r.codelistSubmissionValue
                     : !r.variableName.isEmpty() ? r.variableName : r.crfItem;
-            String normalized = normalize(effectiveList);
+        }
 
-            String rawKey;
+        /** The content-based canonical key alone, needed before shared/exclusive is known (pass 1). */
+        static String rawKeyOf(Row r, String effectiveList) {
+            String base = baseOf(r);
+            String normalized = normalize(effectiveList);
+            return r.isVlmTarget ? "UNIT_" + base + "_" + normalized : base + "_" + normalized;
+        }
+
+        /**
+         * shared = this exact content is referenced by more than one crf_group_id
+         * (e.g. the standard "NY" Yes/No list) - identity must stay content-based,
+         * since there's no single "owning" group to name it after, and this is
+         * exactly the identity fix #1 (duplicate codelists) relies on.
+         *
+         * When it's NOT shared - exclusive to one crf_group_id - a readable,
+         * group-qualified id is used instead of an opaque hash or a meaningless
+         * numeric-soup direct key (reported issues: "QSORRES_163C2CA3" for an
+         * EQ-5D dimension's long text options, and
+         * "FTORRES_0_1_10_2_3_4_5_6_7_8_9" for an 11-point ADAS-Cog scale).
+         * crf_group_id is already guaranteed unique in the COSMOS model, so
+         * <crf_group_id>_<base> is guaranteed distinct from every other
+         * exclusive codelist without any hash - verified against the full
+         * source file with zero collisions (257 distinct codelists, matching
+         * the real SAS log; longest generated id 60 characters).
+         *
+         * isPrepopOnly = this row's term came from prepopulated_term rather than
+         * a real value_list (a single default value being assigned to the
+         * field, not an actual picklist). A prepopulated default (e.g.
+         * LBCAT = "CHEMISTRY", shared across 57 different lab-panel
+         * crf_groups) has nothing to do with whichever crf_group's short_name
+         * happens to end up attached to it - naming it "Subset for
+         * Albumin/Creatinine in Urine (Denormalized)" instead of "Subset for
+         * Chemistry" was Ben's reported issue, and turned out to affect 69
+         * shared prepopulated-value codelists, not just this one - so naming
+         * is decided independently of shared/exclusive below, not nested
+         * inside it.
+         */
+        static CodelistKey build(Row r, String effectiveList, boolean shared, boolean isPrepopOnly) {
+            String base = baseOf(r);
+            String rawKey = rawKeyOf(r, effectiveList);
+            String suffix = r.unitKind == UnitKind.ORIGINAL ? "Original"
+                    : r.unitKind == UnitKind.STANDARD ? "Standard" : "Units";
+
+            // ---- id: shared-vs-exclusive ----
+            String id;
+            if (shared) {
+                id = sanitizeId(base, rawKey);
+            } else {
+                String candidate = sanitize((r.isVlmTarget ? "UNIT_" : "") + r.crfGroupId + "_" + base);
+                if (isPrepopOnly) candidate = candidate + "_PREPOP";
+                // Defensive fallback only - never triggered by the current
+                // source file, but guards against a future, longer
+                // crf_group_id/base combination.
+                id = candidate.length() <= 70 ? candidate : sanitizeId(base, rawKey);
+            }
+
+            // ---- name: unit vs. prepopulated-default vs. group short_name ----
             String name;
             if (r.isVlmTarget) {
-                String suffix = r.unitKind == UnitKind.ORIGINAL ? "Original"
-                        : r.unitKind == UnitKind.STANDARD ? "Standard" : "Units";
-                rawKey = "UNIT_" + base + "_" + normalized;
                 name = "Unit, subset for " + r.shortName + " - " + suffix;
+            } else if (isPrepopOnly) {
+                name = "Subset for " + propcase(effectiveList.trim());
             } else {
-                rawKey = base + "_" + normalized;
                 name = "Subset for " + r.shortName;
             }
-            return new CodelistKey(rawKey, sanitizeId(base, rawKey), name);
+            return new CodelistKey(rawKey, id, name);
+        }
+
+        /** Title-cases a string (mirrors SAS's PROPCASE) - "CHEMISTRY" -> "Chemistry". */
+        private static String propcase(String s) {
+            StringBuilder sb = new StringBuilder();
+            boolean capitalizeNext = true;
+            for (char c : s.toCharArray()) {
+                if (Character.isLetter(c)) {
+                    sb.append(capitalizeNext ? Character.toUpperCase(c) : Character.toLowerCase(c));
+                    capitalizeNext = false;
+                } else {
+                    sb.append(c);
+                    capitalizeNext = true;
+                }
+            }
+            return sb.toString();
         }
 
         /** Trimmed, upper-cased, alphabetically sorted terms - order-independent, case-independent. */
